@@ -1,5 +1,7 @@
 # PsiProxy
 
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-support-FFDD00?logo=buymeacoffee&logoColor=000)](https://buymeacoffee.com/danedge)
+
 PsiProxy is an **optional** helper for PsiTerm, PsiMail and PsiWeb. **You do
 not need it**: the apps are off it as standard, have no proxy address built
 in, and do everything on their own, TLS included. It runs on a computer on
