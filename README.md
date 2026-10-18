@@ -31,6 +31,19 @@ What it does:
 Optionally, it can render JavaScript-only pages in a headless Chromium (see
 [JavaScript rendering](#javascript-rendering)).
 
+**The suite:** PsiProxy serves
+[PsiTerm](https://github.com/danieledge/psiterm) (SSH),
+[PsiMail](https://github.com/danieledge/psimail) (email and calendar) and
+[PsiWeb](https://github.com/danieledge/psiweb) (web browser), and has a
+plug-in from [PsiLinux](https://github.com/danieledge/psilinux). The rest
+of the suite: [PsiCast](https://github.com/danieledge/psicast) (screen
+sharing), [PsiConnect](https://github.com/danieledge/psiconnect) (the Atom
+modem firmware, which has a web proxy of its own) and the shared
+[psion-core](https://github.com/danieledge/psion-core). The suite's home
+page is [danieledge.github.io/psion](https://danieledge.github.io/psion/).
+Until October 2026 PsiProxy lived in the PsiTerm repository as `proxy/`;
+its history carries on here.
+
 ## Pointing the apps at it
 
 On the Psion, open any app's **Tools > Connection settings**, go to
@@ -47,7 +60,8 @@ with an absolute address. The link between the Psion and PsiProxy is therefore
 ## Installing
 
 ```bash
-cd psiproxy                      # this folder, wherever you put it
+git clone https://github.com/danieledge/psiproxy.git ~/psiproxy
+cd ~/psiproxy                    # or wherever you put it
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 # optional, for JavaScript rendering:
@@ -241,8 +255,8 @@ you can [buy me a coffee](https://buymeacoffee.com/danedge).
 
 ## Licence
 
-PsiProxy is part of this repository and is under its MIT licence (see
-`../LICENSE`). The packages it uses have their own licences: trafilatura,
+PsiProxy is under the MIT licence (see `LICENSE`; `THIRD-PARTY.md` lists
+what it uses). The packages it uses have their own licences: trafilatura,
 readability-lxml and Playwright are Apache-2.0, lxml and lxml_html_clean are
 BSD-3-Clause, Pillow is MIT-CMU (HPND), and Textual is MIT. Chromium, which
 Playwright downloads, is under the BSD licence and others. None are included
