@@ -16,3 +16,6 @@ config.json
 # local plug-ins and their list (see README, Plug-ins)
 plugins.local/
 *.local.json
+# Claude Code's local notes
+.claude/
+CLAUDE.local.md
