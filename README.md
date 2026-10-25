@@ -8,6 +8,8 @@ in, and do everything on their own, TLS included. It runs on a computer on
 your network (Linux, macOS, or anything with Python 3.10 or later) and does
 the heavy work that a 36 MHz Psion finds slow.
 
+With the [PsiConnect Atom modem](https://github.com/danieledge/psiconnect), keep the Psion's proxy set to the modem (`psiproxy`) and tell the modem where PsiProxy is (`AT$PU`, firmware 2.7): it hands calls to PsiProxy when it answers and uses its own proxy otherwise. [Choosing your setup](https://github.com/danieledge/psion-core/blob/main/docs/SETUP.md) compares the set-ups.
+
 What each app gets from it, once *Use proxy* is on:
 
 | App | Without PsiProxy | With PsiProxy |
