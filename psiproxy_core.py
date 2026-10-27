@@ -19,7 +19,7 @@ daemon and the TUI both read. reading / collapse_nav persist to
 ~/.config/psiproxy/config.json.
 """
 import os, sys, time, json, socket, select, threading, subprocess, io, re, collections, queue
-import gzip as _gzip, zlib, urllib.request, urllib.error, ssl
+import gzip as _gzip, zlib, urllib.request, urllib.error, urllib.parse, ssl
 import http.client, ipaddress, hmac, importlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2320,6 +2320,9 @@ class RenderEngine:
             c.add_cookies([
                 {"name": "ckns_explicit", "value": "1", "domain": ".bbc.co.uk", "path": "/"},
                 {"name": "ckns_policy", "value": "111", "domain": ".bbc.co.uk", "path": "/"},
+                {"name": "SOCS", "value": "CAI", "domain": ".google.com", "path": "/"},
+                {"name": "SOCS", "value": "CAI", "domain": ".google.co.uk", "path": "/"},
+                {"name": "SOCS", "value": "CAI", "domain": ".youtube.com", "path": "/"},
             ])
         except Exception:
             pass
@@ -2795,6 +2798,22 @@ def _interactive_slim(instr_html, sid, final_url, log):
     return "\n".join(out)
 
 
+# Google's sites show a full-page "Before you continue to Google" cookie
+# choice to a new visitor in the UK and EU, which the Psion cannot get past
+# (it is a script dialog). SOCS=CAI is Google's own "reject all": the page as
+# it is after choosing that, with no tracking cookies agreed to.
+_CONSENT_HOST = re.compile(r"(^|\.)(google\.[a-z]{2,3}(\.[a-z]{2})?|youtube\.com)$")
+
+
+def _with_consent(url, cookie):
+    """The Cookie header for url: SOCS=CAI added for Google's sites, unless the
+    client sent its own SOCS."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if not _CONSENT_HOST.search(host) or re.search(r"(^|;)\s*SOCS=", cookie or ""):
+        return cookie
+    return (cookie + "; " if cookie else "") + "SOCS=CAI"
+
+
 def _open_upstream(method, url, client_headers, body, is_image, range_header, log):
     """Open the upstream connection (TLS, redirects) WITHOUT reading the body, so
     the caller can either stream it (downloads/Range) or buffer+decompress it
@@ -2812,6 +2831,9 @@ def _open_upstream(method, url, client_headers, body, is_image, range_header, lo
               "if-modified-since", "if-none-match", "content-type"):
         if k in client_headers:
             req_headers[k.title()] = client_headers[k]
+    ck = _with_consent(url, req_headers.get("Cookie"))
+    if ck:
+        req_headers["Cookie"] = ck
     if range_header:
         req_headers["Range"] = range_header
 
