@@ -28,6 +28,10 @@ What it does:
   in memory;
 - it turns pictures (WebP, AVIF, JPEG, PNG, GIF) into small 16-grey GIFs, at
   most 320 pixels wide, for PsiWeb and for PsiMail's web pictures;
+- on the **netBook** (640x480, 256 colours) it gives PsiWeb pictures in
+  colour up to 560 pixels wide, keeps tables that fit, and keeps each page
+  light (see [The netBook](#the-netbook)); the Series 5mx's output is
+  unchanged;
 - it keeps one connection open with the Psion, so a modem dials once;
 - it streams downloads untouched, with `Range` support so updates can resume;
 - it receives logs from the apps' **Send log to server** button (`/_putlog`).
@@ -140,8 +144,9 @@ and `fe80::/10`, and IPv6 ULA `fc00::/7`. A VPN such as Tailscale
 (`100.64.0.0/10`) is not included; add it if you need it. Set your own list to
 narrow it, for example `PSIPROXY_ALLOW=192.168.1.40/32` for one Psion.
 
-The four runtime toggles (Reading view, Collapse menus, JS rendering,
-Interactive) are saved in `config.json` in the state folder.
+The runtime toggles (Reading view, Collapse menus, JS rendering,
+Interactive, and Screen: see [The netBook](#the-netbook)) are saved in
+`config.json` in the state folder.
 
 ## Security
 
@@ -228,6 +233,64 @@ plug-in: put `psiapk.py` from that project in `plugins.local/`, and either
 list it in `plugins.local.json` or start the proxy with
 `PSIPROXY_PLUGINS=psiapk` (the module names its own route, `/_apk/`).
 
+## The netBook
+
+PsiWeb 0.83 and later say which screen they draw on, in each request they
+send to a proxy (and only to a proxy, never to a site):
+
+```
+X-Psi-Screen: 640x240x16      the Series 5mx: 640 x 240, 16 greys
+X-Psi-Screen: 640x480x256     the netBook: 640 x 480, EPOC's 256 colours
+```
+
+A request without the header (an older PsiWeb, PsiMail's web pictures,
+anything else) or with fewer than 256 colours gets the 5mx's output,
+exactly as before (`test/test_netbook.py` checks it byte for byte against
+the previous version, on saved real pages). A colour screen gets:
+
+| | Series 5mx (as before) | netBook |
+|---|---|---|
+| Photos | 16-grey GIF, at most 320 wide | colour JPEG, at most 560 wide and 900 high, about 48 KB at most (quality 65 down to 45, then smaller) |
+| Drawings (256 colours or fewer: logos, flags, diagrams) | 16-grey GIF | PNG in EPOC's own 256 colours, nearest colour, no dither: crisp, and exactly what the screen shows |
+| Small photos (under 12 KB as JPEG) | 16-grey GIF | PNG dithered to EPOC's 256 colours (PsiWeb 0.83 can draw a small JPEG black on the netBook: see below) |
+| Article column | 560 (reading view 500) | 600 (reading view 560) |
+| Tables | dropped | kept when they fit: 6 columns at most, no table inside, no cell over 200 characters; any other is one line a row, cells joined by `\|` |
+| Also kept | headings, lists, links | the same, and `pre`, definition lists |
+| Limits | none | 30 pictures a page (later ones become `[Picture]` links); 160 KB of HTML, cut at a paragraph with a link to the rest |
+
+Why JPEG for photos and not GIFs in the netBook's palette: PsiWeb on the
+netBook already dithers every picture to EPOC's 256 colours itself
+(Floyd-Steinberg, in colour), so a picture dithered here first looks the
+same on the screen, and is about three times the bytes on the serial line
+(`test/compare.py` measures it: a 560x422 photo is 47 KB as JPEG, 136 KB as
+a dithered GIF, 122 KB as a dithered PNG). Decoding the JPEG costs the
+netBook's 190 MHz StrongARM about as much as the PNG (78 million
+instructions against 76 for the whole page, in PsiWeb's ARM harness).
+
+**Turning it on:** nothing to set. Update PsiProxy and PsiWeb (0.83); a
+netBook's PsiWeb then gets the netBook's output, a 5mx's the 5mx's. For an
+older PsiWeb on a netBook, open `http://psiproxy/` and change **Screen**
+to "netBook (colour) for every client" (it then applies to every client
+of this proxy, a 5mx too). With the PsiConnect Atom in front of PsiProxy
+(`AT$PU`), the header reaches PsiProxy unchanged.
+
+**Known fault in PsiWeb 0.83 and earlier, on the netBook:** a JPEG whose
+whole file reaches the browser engine in one piece is drawn black (in
+PsiWeb's ARM harness: a JPEG under about 8 KB). PsiProxy works round it by
+sending small photos as PNG.
+
+### Tests
+
+```
+python3 test/fetch_fixtures.py     # once: saves real pages and pictures in test/fixtures/ (git-ignored)
+python3 test/test_netbook.py       # the tests (made-up pages and pictures when there are no fixtures)
+python3 test/compare.py            # 5mx against netBook, page by page and picture by picture: test/out/
+python3 test/compare.py --psiweb ../psiweb bbc-article   # and screenshots through PsiWeb's ARM harness
+```
+
+`test_netbook.py` starts this PsiProxy on 127.0.0.1 with its own settings
+folder, so a PsiProxy you run is not touched.
+
 ## JavaScript rendering
 
 Some sites send an empty page and draw everything with JavaScript. When the
@@ -249,6 +312,7 @@ This needs `requirements-optional.txt`, the Chromium download, and
 | `psiproxytui.py` | The dashboard (Textual) |
 | `psiproxy` | Starts the dashboard |
 | `psiproxy.env.example` | A settings file to copy |
+| `test/` | The tests (`test_netbook.py`), the comparison (`compare.py`) and the fixture fetcher |
 | `psiproxy.service.example` | A systemd user unit to copy |
 | `requirements.txt`, `requirements-optional.txt` | Python packages |
 

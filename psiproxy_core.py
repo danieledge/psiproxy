@@ -133,7 +133,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 PSISIMP = os.environ.get("PSISIMP", os.path.join(CONFIG_DIR, "psisimp"))
 
 PROXY_HOST = "psiproxy"                   # the magic control-page name (back-compat)
-PROXY_VERSION = "PsiProxy/1.0"
+PROXY_VERSION = "PsiProxy/1.01"
 # The Psion's Links reads 8-bit Windows-1252, not UTF-8, so every HTML response
 # is encoded to cp1252 and declared as such (see _html_bytes).
 HTML_CTYPE = "text/html; charset=windows-1252"
@@ -149,6 +149,93 @@ PROXY_READER_WIDTH = 500                 # reading view: article column width (L
                                          # <table width=N>; it has no CSS)
 PROXY_ARTICLE_WIDTH = 560                # normal mode, article pages: column width (a little
                                          # wider than the reader, to fit images)
+
+# -- the screen each request is for (see README, "The netBook") --------------
+# PsiWeb 0.83 and later say which screen it draws on, in every request it
+# sends to a proxy: "X-Psi-Screen: 640x240x16" (the Series 5mx, 16 greys) or
+# "640x480x256" (the netBook, EPOC's 256 colours): width x height of the
+# part of the screen pages are drawn in, and the colours. A request without
+# it (an older PsiWeb, PsiMail's web pictures, anything else) gets the 5mx's
+# output, exactly as before. The control page's "Screen" setting (State.screen)
+# can force one or the other: "auto" (the default) follows the header.
+SCREEN_HEADER = "x-psi-screen"
+NB_IMG_MAXW = 560                        # netBook pictures: largest width (PsiWeb's page
+                                         # is 640 wide with a margin of 24 a side, and the column
+                                         # is 600: see NB_COLUMN)
+NB_IMG_MAXH = 900                        # ... and height (a tall infographic is shrunk to fit)
+NB_COLUMN = 600                          # netBook: the article and index column
+NB_READER_COLUMN = 560                   # netBook: the reading view's column
+NB_JPEG_QUALITY = 65                     # photos: baseline JPEG (PsiWeb dithers to the palette)
+NB_JPEG_MIN_QUALITY = 45
+NB_IMG_BUDGET = 48 * 1024                # one picture: made smaller (quality, then size) above this
+NB_SMALL_JPEG = 12 * 1024               # a photo smaller than this as JPEG goes as a dithered
+                                         # PNG (PsiWeb's small-JPEG fault: _transcode_colour)
+NB_GRAPHIC_COLOURS = 256                 # a source with no more colours than this is a drawing:
+                                         # EPOC's palette, nearest colour, PNG (crisp, small)
+NB_PAGE_MAX = 160 * 1024                 # a slimmed page is cut at a paragraph beyond this
+NB_PAGE_PICTURES = 30                    # pictures shown on one page; later ones become links
+NB_TABLE_MAXCOLS = 6                     # a table wider than this is flattened to lines
+NB_TABLE_MAXCELL = 200                   # ... or one with a cell longer than this (a layout table)
+
+
+class Screen:
+    """What one request's output is made for. The 5mx profile is the proxy's
+    output as it has always been; the netBook profile is wider pictures in
+    colour, tables kept where they fit, and limits so a page stays light."""
+    def __init__(self, name, width, height, colours, img_maxw, column, reader_column):
+        self.name = name
+        self.width, self.height, self.colours = width, height, colours
+        self.img_maxw = img_maxw
+        self.column = column
+        self.reader_column = reader_column
+
+    @property
+    def netbook(self):
+        return self.colours >= 256
+
+    def __repr__(self):
+        return "Screen(%s %dx%dx%d)" % (self.name, self.width, self.height, self.colours)
+
+
+SCREEN_5MX = Screen("5mx", 640, 240, 16, 320, 560, 500)
+SCREEN_NETBOOK = Screen("netbook", 640, 480, 256, NB_IMG_MAXW, NB_COLUMN, NB_READER_COLUMN)
+_req = threading.local()                 # the screen of the request this thread is serving
+
+
+def _screen():
+    """The current request's screen (the 5mx's when none was set)."""
+    return getattr(_req, "screen", None) or SCREEN_5MX
+
+
+def _parse_screen(value):
+    """'640x480x256' -> a Screen, or None if it does not parse. Only a colour
+    screen (256 colours or more) gets the netBook profile; anything else is
+    the 5mx's. Sizes are bounded: a request is untrusted input."""
+    m = re.match(r"^\s*(\d{2,4})\s*x\s*(\d{2,4})\s*x\s*(\d{1,8})\s*$", value or "")
+    if not m:
+        return None
+    w, h, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if not (160 <= w <= 2048 and 100 <= h <= 2048 and c >= 2):
+        return None
+    if c < 256:
+        return SCREEN_5MX
+    col = max(320, min(NB_COLUMN, w - 40))
+    return Screen("netbook", w, h, c, max(160, min(NB_IMG_MAXW, col - 40)), col,
+                  min(NB_READER_COLUMN, col))
+
+
+def screen_for(headers, forced="auto"):
+    """The screen a request is for: forced ('5mx' or 'netbook', the control
+    page's setting) wins; otherwise the X-Psi-Screen header; otherwise the
+    5mx's (an older PsiWeb, PsiMail, anything else)."""
+    if forced == "5mx":
+        return SCREEN_5MX
+    if forced == "netbook":
+        return _parse_screen((headers or {}).get(SCREEN_HEADER, "")) or SCREEN_NETBOOK
+    scr = _parse_screen((headers or {}).get(SCREEN_HEADER, ""))
+    return scr or SCREEN_5MX
+
+
 # Defaults for the two runtime flags (now held in State, overridden by config.json).
 DEFAULT_READER = False                   # Reading view: strip to article (no pictures).
 DEFAULT_COLLAPSE_NAV = True              # Collapse site menus to a single [ Menu ] link.
@@ -256,6 +343,7 @@ class State:
         self.collapse_nav = DEFAULT_COLLAPSE_NAV
         self.js_render = DEFAULT_JS_RENDER
         self.interactive = DEFAULT_INTERACTIVE
+        self.screen = "auto"              # auto (X-Psi-Screen), 5mx or netbook
         self.pages_ok = 0
         self.pages_failed = 0
         self.bytes_in = 0                 # upstream (decoded) bytes fetched
@@ -281,6 +369,8 @@ class State:
                     self.js_render = d["js_render"]
                 if isinstance(d.get("interactive"), bool):
                     self.interactive = d["interactive"]
+                if d.get("screen") in ("auto", "5mx", "netbook"):
+                    self.screen = d["screen"]
         except FileNotFoundError:
             pass
         except Exception:
@@ -291,7 +381,8 @@ class State:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             with self._lock:
                 d = {"reading": self.reading, "collapse_nav": self.collapse_nav,
-                     "js_render": self.js_render, "interactive": self.interactive}
+                     "js_render": self.js_render, "interactive": self.interactive,
+                     "screen": self.screen}
             tmp = CONFIG_FILE + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(d, f)
@@ -333,6 +424,15 @@ class State:
         self.save()
         return new
 
+    def cycle_screen(self):
+        """auto -> netbook -> 5mx -> auto (the control page's Screen line)."""
+        with self._lock:
+            order = ("auto", "netbook", "5mx")
+            self.screen = order[(order.index(self.screen) + 1) % 3] if self.screen in order else "auto"
+            new = self.screen
+        self.save()
+        return new
+
     def note_render(self, ms):
         with self._lock:
             self.renders += 1
@@ -364,6 +464,7 @@ class State:
                 "collapse_nav": self.collapse_nav,
                 "js_render": self.js_render,
                 "interactive": self.interactive,
+                "screen": self.screen,
                 "pages_ok": self.pages_ok,
                 "pages_failed": self.pages_failed,
                 "renders": self.renders,
@@ -688,6 +789,9 @@ class ProxySession:
             client_close = False
         accepts_gzip = "gzip" in headers.get("accept-encoding", "").lower()
         accept = headers.get("accept", "").lower()
+        # the screen this request is for (X-Psi-Screen, or the control page's
+        # setting): the 5mx's unless the request says otherwise
+        _req.screen = screen_for(headers, STATE.screen)
         self._req_sid = _parse_cookie(headers.get("cookie", ""), "psi_sess")
         self._emit_sid = None
 
@@ -867,7 +971,22 @@ class ProxySession:
                                      % (hostpart, rms, after, before))
                     else:
                         self.log("js-render: %s unavailable/failed; kept static" % hostpart)
+            if _screen().netbook:
+                slim = _limit_page(slim, final_url, self.log)
             bodyb = _html_bytes(slim)               # OUTPUT -> Windows-1252
+        elif _screen().netbook:  # transcode_img, for the netBook: colour
+            # pictures in colour at the netBook's size: a photo as a baseline
+            # JPEG (PsiWeb dithers it to EPOC's palette itself), a drawing in
+            # EPOC's palette as PNG; on any failure the original bytes go through
+            res = _transcode_colour(bodyb, _screen(), self.log) if bodyb else None
+            if res is not None:
+                orig = len(bodyb)
+                bodyb, out_ctype, how = res
+                self.log("proxy: image %.60s %s %d -> %s %d bytes (netBook)"
+                         % (url, low_ct, orig, how, len(bodyb)))
+            else:
+                self.passthru += 1
+                out_ctype = ctype or "application/octet-stream"
         else:   # transcode_img
             # transcode WebP/AVIF/etc. (and JPEG/PNG/GIF) to a small 16-grey GIF
             # Links can show; on any failure the original bytes go through
@@ -900,8 +1019,9 @@ class ProxySession:
                                    close, extra))
         kind = "html" if slim_html else "img"
         ms = int((time.time() - t0) * 1000)
-        self.log("proxy: %s %s %.80s -> %d %s, %d->%d bytes, %d ms"
-                 % (method, hostpart, url, status, kind, in_bytes, len(bodyb), ms))
+        self.log("proxy: %s %s %.80s -> %d %s, %d->%d bytes, %d ms%s"
+                 % (method, hostpart, url, status, kind, in_bytes, len(bodyb), ms,
+                    " (netBook)" if _screen().netbook else ""))
         STATE.record(method, hostpart, status, in_bytes, len(bodyb), ms,
                      ok=(status < 500))
         return not close
@@ -974,6 +1094,9 @@ class ProxySession:
             elif "js" in q:
                 new = STATE.toggle_flag("js_render")
                 self.log("proxy: JS rendering %s (web)" % ("on" if new else "off"))
+            elif "screen" in q:
+                new = STATE.cycle_screen()
+                self.log("proxy: screen %s (web)" % new)
         return self._control_page(close, authority)
 
     def _control_page(self, close, authority=None):
@@ -988,7 +1111,7 @@ class ProxySession:
         body = ('<base href="http://%s/">\n'
                 '<table width="%d" align="center"><tr><td>\n'
                 '<h1>PsiProxy</h1>\n'
-                '<ul>\n%s\n%s\n%s\n%s\n</ul>\n'
+                '<ul>\n%s\n%s\n%s\n%s\n%s\n</ul>\n'
                 '<hr><font size="2">Pages served: %d &middot; Failed: %d '
                 '&middot; JS renders: %d &middot; Last site: %s</font>\n'
                 '</td></tr></table>'
@@ -998,6 +1121,11 @@ class ProxySession:
                    (row("JS rendering", snap["js_render"], "js") if JS_RENDER_ALLOWED
                     else "<li>JS rendering: <b>not enabled on this proxy</b></li>"),
                    row("Interactive", snap["interactive"], "act"),
+                   ('<li>Screen: <b>%s</b> &middot; <a href="http://%s/toggle?screen">change</a></li>'
+                    % ({"auto": "as PsiWeb says (this one: %s)" % _screen().name,
+                        "netbook": "netBook (colour) for every client",
+                        "5mx": "5mx (16 greys) for every client"}.get(snap["screen"], "auto"),
+                       _esc_attr(auth))),
                    snap["pages_ok"], snap["pages_failed"], snap["renders"],
                    _esc_text(snap["last_host"] or "-"))
                 )
@@ -1462,7 +1590,8 @@ def _build_article(body_bytes, final_url, keep_images, keep_links, width,
         try:
             traf_body = trafilatura.extract(
                 html, url=final_url, output_format="html",
-                include_links=keep_links, include_images=keep_images, include_tables=False,
+                include_links=keep_links, include_images=keep_images,
+                include_tables=_screen().netbook,  # (the netBook keeps tables that fit)
                 include_comments=False, include_formatting=True, with_metadata=False)
         except Exception as e:
             log("article: trafilatura extract failed (%s)" % e)
@@ -1566,14 +1695,14 @@ def _reader_page(body_bytes, final_url, log):
     """Reading view: the clean article skeleton with pictures off and in-text
     links flattened to plain text."""
     return _build_article(body_bytes, final_url, keep_images=False, keep_links=False,
-                          width=PROXY_READER_WIDTH, footer_label="Reader view", log=log)
+                          width=_screen().reader_column, footer_label="Reader view", log=log)
 
 
 def _normal_article_page(body_bytes, final_url, log):
     """Normal mode, article pages: the same clean skeleton, but with pictures and
     in-text links kept (so the title is a heading, body links are underlined)."""
     return _build_article(body_bytes, final_url, keep_images=True, keep_links=True,
-                          width=PROXY_ARTICLE_WIDTH, footer_label=None, log=log)
+                          width=_screen().column, footer_label=None, log=log)
 
 
 def _looks_like_index(url):
@@ -1613,6 +1742,11 @@ def _tidy_html(data):
 # FrogFind-style hard allowlist: the oldest presentational tags Links renders
 _MINIMIZE_ALLOWED = {"p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol",
                      "li", "b", "i", "blockquote", "small", "hr"}
+
+# the netBook's taller, colour screen keeps a few more: tables that fit
+# (_fit_tables), preformatted text and definition lists
+_MINIMIZE_NETBOOK = {"table", "caption", "tr", "td", "th", "pre", "dl", "dt", "dd"}
+_TABLE_PARTS = ("thead", "tbody", "tfoot", "colgroup", "col")
 
 _LAZY_SRC_ATTRS = ("data-src", "data-original", "data-lazy-src", "data-lazy", "data-url")
 
@@ -1765,6 +1899,9 @@ def _minimize_html(body_html, keep_images, keep_links, log, interactive=False):
             allowed.add("img")
         if interactive:
             allowed |= _INTERACTIVE_TAGS
+        netbook = _screen().netbook
+        if netbook:
+            allowed |= _MINIMIZE_NETBOOK
         root = LH.fragment_fromstring(body_html, create_parent="div")
         etree.strip_tags(root, etree.Comment)
         # demote the newer inline tags to the oldest ones
@@ -1784,6 +1921,9 @@ def _minimize_html(body_html, keep_images, keep_links, log, interactive=False):
             drop.add("img")
         if not keep_links:
             drop.add("a")
+        if netbook:
+            etree.strip_tags(root, *_TABLE_PARTS)   # (rows straight under <table>)
+            _fit_tables(root)                       # before the attributes go (colspan)
         if drop:
             etree.strip_tags(root, *drop)
         if keep_images:
@@ -1796,9 +1936,16 @@ def _minimize_html(body_html, keep_images, keep_links, log, interactive=False):
             keep = ("href", "name") if t == "a" else ("src", "alt") if t == "img" else ()
             if interactive and t in _INTERACTIVE_KEEP_ATTRS:
                 keep = _INTERACTIVE_KEEP_ATTRS[t]
+            if netbook and t in ("td", "th"):
+                keep = ("colspan", "rowspan")
             for name in list(el.attrib):
                 if name.lower() not in keep:
                     del el.attrib[name]
+            if netbook and t == "table":
+                # Links has no CSS: a ruled table with a little room in it
+                el.set("border", "1")
+                el.set("cellpadding", "2")
+                el.set("cellspacing", "0")
         # drop section-label headings that have no content under them (generic;
         # safe for articles, whose headings do have content)
         _drop_empty_headings(root)
@@ -1811,6 +1958,126 @@ def _minimize_html(body_html, keep_images, keep_links, log, interactive=False):
     except Exception as e:
         log("minimize: failed (%s); body left as-is" % e)
         return body_html
+
+
+def _fit_tables(root):
+    """The netBook: keep a table that fits a 600-pixel column (at most
+    NB_TABLE_MAXCOLS columns, no table inside it, no cell longer than
+    NB_TABLE_MAXCELL characters); flatten any other into one line a row,
+    the cells joined by ' | ' (a layout table, or a data table too wide to
+    read). Innermost tables first. Never raises."""
+    try:
+        from lxml import etree
+        tables = [t for t in root.iter("table") if isinstance(t.tag, str)]
+        for t in reversed(tables):              # (document order reversed: inner first)
+            if t.getparent() is None:
+                continue
+            rows = [r for r in t.iter("tr") if isinstance(r.tag, str)]
+            ncols = 0
+            longest = 0
+            nested = any(x is not t for x in t.iter("table"))
+            for r in rows:
+                cells = [c for c in r if isinstance(c.tag, str) and c.tag.lower() in ("td", "th")]
+                width = 0
+                for c in cells:
+                    try:
+                        width += max(1, min(20, int(c.get("colspan") or 1)))
+                    except ValueError:
+                        width += 1
+                    longest = max(longest, len(re.sub(r"\s+", " ", c.text_content() or "").strip()))
+                ncols = max(ncols, width)
+            if rows and ncols and ncols <= NB_TABLE_MAXCOLS and longest <= NB_TABLE_MAXCELL and not nested:
+                continue                         # it fits: kept as a table
+            # flatten: each row one line, cells joined
+            out = etree.Element("div")
+            cap = t.find("caption")
+            if cap is not None and (cap.text_content() or "").strip():
+                b = etree.SubElement(out, "p")
+                b.text = re.sub(r"\s+", " ", cap.text_content()).strip()
+            for r in rows:
+                cells = [c for c in r if isinstance(c.tag, str) and c.tag.lower() in ("td", "th")]
+                if not cells:
+                    continue
+                p = etree.SubElement(out, "p")
+                first = True
+                for c in cells:
+                    if not (c.text_content() or "").strip() and not len(c):
+                        continue
+                    if not first:
+                        if len(p):
+                            p[-1].tail = (p[-1].tail or "") + " | "
+                        else:
+                            p.text = (p.text or "") + " | "
+                    first = False
+                    # the cell's content moves into the line (links and all)
+                    if c.text:
+                        if len(p):
+                            p[-1].tail = (p[-1].tail or "") + c.text
+                        else:
+                            p.text = (p.text or "") + c.text
+                    for k in list(c):
+                        p.append(k)
+            out.tail = t.tail
+            t.getparent().replace(t, out)
+        # a flattened table leaves <tr>/<td>/<caption> of no table: unwrap them
+        stray = [el for el in root.iter() if isinstance(el.tag, str)
+                 and el.tag.lower() in ("tr", "td", "th", "caption")
+                 and not any(isinstance(a.tag, str) and a.tag.lower() == "table"
+                             for a in el.iterancestors())]
+        if stray:
+            for el in stray:
+                el.tag = "psi-unwrap"
+            etree.strip_tags(root, "psi-unwrap")
+        # the flattening's <div> wrappers go too (div is not in the allowlist)
+    except Exception:
+        return
+
+
+def _limit_page(html, final_url, log):
+    """The netBook: keep a slimmed page light. At most NB_PAGE_PICTURES
+    pictures (later ones become a "[Picture]" link to the picture), and at
+    most NB_PAGE_MAX bytes of HTML, cut at a paragraph or list item with a
+    note and a link to the whole page. Returns the page (unchanged on any
+    failure)."""
+    try:
+        n = [0]
+
+        def pic(m):
+            n[0] += 1
+            if n[0] <= NB_PAGE_PICTURES:
+                return m.group(0)
+            src = re.search(r'(?i)\bsrc="([^"]*)"', m.group(0))
+            if not src:
+                return ""
+            return '<a href="%s">[Picture]</a>' % src.group(1)
+        html = re.sub(r"(?is)<img\b[^>]*>", pic, html)
+        if n[0] > NB_PAGE_PICTURES:
+            log("limit: %d pictures, %d shown" % (n[0], NB_PAGE_PICTURES))
+        size = len(html.encode("utf-8", "replace"))
+        if size <= NB_PAGE_MAX:
+            return html
+        # cut at the last block end before the limit (counted in characters,
+        # a close enough stand-in for the cp1252 bytes that go on the line)
+        cut = html.rfind("</p>", 0, NB_PAGE_MAX)
+        cut2 = html.rfind("</li>", 0, NB_PAGE_MAX)
+        cut = max(cut, cut2)
+        if cut < NB_PAGE_MAX // 2:
+            cut = NB_PAGE_MAX
+        else:
+            cut += 5 if html.startswith("</li>", cut) else 4
+        head = html[:cut]
+        # close what the cut left open, so Links' layout is not confused
+        for tag in ("ul", "ol", "table", "dl", "pre", "blockquote"):
+            opened = len(re.findall(r"(?i)<%s\b" % tag, head))
+            closed = len(re.findall(r"(?i)</%s>" % tag, head))
+            head += ("</%s>" % tag) * max(0, opened - closed)
+        log("limit: page cut at %d of %d bytes" % (cut, size))
+        return (head + '\n<hr><p><b>Page shortened for the netBook</b> (%d KB of %d KB). '
+                '<a href="%s">The rest is at the source</a>.</p></td></tr></table>'
+                % (cut // 1024, size // 1024, _esc_attr(final_url)))
+    except Exception as e:
+        log("limit: failed (%s)" % e)
+        return html
 
 
 # Standalone metadata-noise fragments common on news indexes (BBC etc.). Each is
@@ -1855,7 +2122,7 @@ def _index_page(body_bytes, final_url, log):
     body = _strip_index_noise(body)
     body = _tidy_html(body.encode("utf-8", "replace")).decode("utf-8", "replace")
     out = ['<base href="%s">' % _esc_attr(final_url),
-           '<table width="%d" align="center"><tr><td>' % PROXY_ARTICLE_WIDTH,
+           '<table width="%d" align="center"><tr><td>' % _screen().column,
            body,
            '</td></tr></table>']
     return "\n".join(out)
@@ -2128,7 +2395,7 @@ def _index_page2(html, final_url, log):
     assembled = _tidy_html(assembled.encode("utf-8", "replace")).decode("utf-8", "replace")
     log("index2: %d headlines, %d nav links" % (len(seen_content), len(seen_nav)))
     out = ['<base href="%s">' % _esc_attr(final_url),
-           '<table width="%d" align="center"><tr><td>' % PROXY_ARTICLE_WIDTH,
+           '<table width="%d" align="center"><tr><td>' % _screen().column,
            assembled,
            '</td></tr></table>']
     return "\n".join(out)
@@ -2179,6 +2446,117 @@ def _transcode_image(body_bytes, log):
         return buf.getvalue()
     except Exception as e:
         log("proxy: image not transcoded (%s); sent original" % e)
+        return None
+
+
+# EPOC R5's 256-colour palette (TRgb::Color256), the netBook's: a 6x6x6
+# cube in two halves with 16-step ramps of grey, red, green and blue between
+# them. Made here rather than listed, in TRgb's own terms (0x00BBGGRR, so
+# each tuple below is (blue, green, red) until the last line turns it round):
+# the cube's first half (blue 0, 0x33, 0x66), the ramps, the second half.
+# test/test_netbook.py checks it entry by entry against PsiWeb's psi_pal.h.
+def _epoc256():
+    six = (0, 0x33, 0x66, 0x99, 0xcc, 0xff)
+    cube = [(b, g, r) for b in six for g in six for r in six]
+    steps = (0x11, 0x22, 0x44, 0x55, 0x77, 0x88, 0xaa, 0xbb, 0xdd, 0xee)
+    lo, hi = steps[:5], steps[5:]
+    ramps = ([(v, v, v) for v in lo] + [(0, 0, v) for v in lo] +      # grey, red,
+             [(0, v, 0) for v in lo] + [(v, 0, 0) for v in lo] +      # green, blue
+             [(v, 0, 0) for v in hi] + [(0, v, 0) for v in hi] +      # blue, green,
+             [(0, 0, v) for v in hi] + [(v, v, v) for v in hi])       # red, grey
+    pal = cube[:108] + ramps + cube[108:]
+    return [(r, g, b) for (b, g, r) in pal]
+
+
+EPOC256 = _epoc256()
+_EPOC_PAL_IMG = None
+
+
+def _epoc_palette_image():
+    global _EPOC_PAL_IMG
+    if _EPOC_PAL_IMG is None and Image is not None:
+        im = Image.new("P", (1, 1))
+        flat = []
+        for c in EPOC256:
+            flat.extend(c)
+        im.putpalette(flat)
+        _EPOC_PAL_IMG = im
+    return _EPOC_PAL_IMG
+
+
+def _transcode_colour(body_bytes, scr, log):
+    """The netBook: any picture (WebP, AVIF, JPEG, PNG, GIF...) in colour,
+    at most scr.img_maxw x NB_IMG_MAXH. Returns (bytes, content type, what),
+    or None to send the original.
+      - a drawing (no more than NB_GRAPHIC_COLOURS colours in the source: a
+        logo, a flag, a diagram, a screenshot of text) goes into EPOC's own
+        palette, nearest colour, no dither, as PNG: what the screen shows is
+        exactly that, crisp, and small on the line;
+      - a photo goes as a baseline JPEG: PsiWeb on the netBook dithers it to
+        the palette itself (Floyd-Steinberg, in colour), and a JPEG is a
+        third the size of the same picture dithered to the palette as GIF
+        or PNG (test/compare.py measures it), which is what counts on a
+        serial line. Quality steps down, then the size, to stay within
+        NB_IMG_BUDGET.
+    Transparency is laid on white (PsiWeb's page)."""
+    if Image is None:
+        return None
+    try:
+        im = Image.open(io.BytesIO(body_bytes))
+        fmt = (im.format or "").upper()
+        try:
+            im.seek(0)
+        except Exception:
+            pass
+        if im.width <= 0 or im.height <= 0 or im.width * im.height > 40_000_000:
+            return None
+        if fmt == "JPEG":
+            im.draft("RGB", (scr.img_maxw, NB_IMG_MAXH))   # (a big JPEG decoded at 1/2..1/8)
+        if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+            im = im.convert("RGBA")
+            bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            bg.alpha_composite(im)
+            im = bg
+        im = im.convert("RGB")
+        graphic = im.getcolors(NB_GRAPHIC_COLOURS) is not None
+        scale = min(1.0, scr.img_maxw / im.width, NB_IMG_MAXH / im.height)
+        if scale < 1.0:
+            size = (max(1, round(im.width * scale)), max(1, round(im.height * scale)))
+            im = im.resize(size, Image.LANCZOS, reducing_gap=3.0)
+        if graphic:
+            q = im.quantize(palette=_epoc_palette_image(), dither=Image.Dither.NONE)
+            buf = io.BytesIO()
+            q.save(buf, "PNG", optimize=True)
+            return (buf.getvalue(), "image/png", "png %dx%d epoc256" % im.size)
+        quality = NB_JPEG_QUALITY
+        for _ in range(6):
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=quality, optimize=True, progressive=False,
+                    subsampling=2)
+            out = buf.getvalue()
+            if len(out) <= NB_IMG_BUDGET:
+                break
+            if quality > NB_JPEG_MIN_QUALITY:
+                quality = max(NB_JPEG_MIN_QUALITY, quality - 10)
+            else:
+                im = im.resize((max(1, int(im.width * 0.8)), max(1, int(im.height * 0.8))),
+                               Image.LANCZOS)
+        if len(out) < NB_SMALL_JPEG:
+            # PsiWeb 0.83 and earlier on the netBook draw a JPEG black when
+            # the whole file reaches the engine in one piece (a small one:
+            # see the README, "The netBook"): a small photo goes dithered
+            # to EPOC's palette as PNG instead, a few KB more
+            q = im.quantize(palette=_epoc_palette_image(), dither=Image.Dither.FLOYDSTEINBERG)
+            buf = io.BytesIO()
+            q.save(buf, "PNG", optimize=True)
+            return (buf.getvalue(), "image/png", "png %dx%d epoc256 dithered" % im.size)
+        # a baseline JPEG that already fits and is smaller as it was: keep it
+        if (fmt == "JPEG" and scale == 1.0 and NB_SMALL_JPEG <= len(body_bytes) <= len(out)
+                and b"\xff\xc2" not in body_bytes[:65536]):
+            return (body_bytes, "image/jpeg", "kept jpeg")
+        return (out, "image/jpeg", "jpeg %dx%d q%d" % (im.width, im.height, quality))
+    except Exception as e:
+        log("proxy: image not transcoded for the netBook (%s); sent original" % e)
         return None
 
 
@@ -2791,7 +3169,7 @@ def _interactive_slim(instr_html, sid, final_url, log):
     body = _tidy_html(body.encode("utf-8", "replace")).decode("utf-8", "replace")
     log("interactive: %d actions, %d forms" % (acts, forms))
     out = ['<base href="%s">' % _esc_attr(final_url),
-           '<table width="%d" align="center"><tr><td>' % PROXY_ARTICLE_WIDTH,
+           '<table width="%d" align="center"><tr><td>' % _screen().column,
            '<font size="2">PsiProxy live view &middot; %s</font><hr>' % _esc_text(final_url[:80]),
            body,
            '</td></tr></table>']

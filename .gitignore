@@ -19,3 +19,6 @@ plugins.local/
 # Claude Code's local notes
 .claude/
 CLAUDE.local.md
+# the tests: saved real pages and pictures, other people's work (test/fetch_fixtures.py)
+test/fixtures/
+test/out/

@@ -14,6 +14,8 @@ address built in**. Plain Python 3.10+, no build step.
 - `psiproxyd.py`: the daemon (TCP server, client allowlist, control socket,
   log). `psiproxy_core.py`: the engine (fetching with TLS on the computer,
   page slimming for a 640x240 16-grey browser, pictures to 16-grey GIFs,
+  and for the netBook (`X-Psi-Screen`, 256 colours) colour pictures, tables
+  and page limits; the 5mx's output must not change (one Coda),
   one connection per Psion, `Range` downloads, plug-ins, checks).
   `psiproxytui.py` and `psiproxy`: the Textual dashboard.
 - Routes the apps use: ordinary proxied `GET`/`POST`, `/_putlog` (the apps'
@@ -35,7 +37,10 @@ changing this repository changes nothing running.
 
 ## Testing
 
-There is no test suite. Smoke checks: `python3 -m py_compile *.py`,
+`python3 test/test_netbook.py` (the netBook output, and the 5mx's output
+byte for byte against the version before it, `BASELINE_REF`; saved real pages from
+`test/fetch_fixtures.py` when present) and `python3 test/compare.py`. They
+use their own settings folder: never the live proxy's. Smoke checks: `python3 -m py_compile *.py`,
 `bash -n psiproxy`, and a run on 127.0.0.1 with `curl -x 127.0.0.1:8081
 http://example.com/`. The link between the Psion and PsiProxy is plain
 HTTP: keep it on a trusted network (`PSIPROXY_ALLOW`).
