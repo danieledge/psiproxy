@@ -39,7 +39,8 @@ changing this repository changes nothing running.
 
 `python3 test/test_netbook.py` (the netBook output, and the 5mx's output
 byte for byte against the version before it, `BASELINE_REF`; saved real pages from
-`test/fetch_fixtures.py` when present) and `python3 test/compare.py`. They
+`test/fetch_fixtures.py` when present), `python3 test/test_guards.py` (the
+limits on what a site can make the proxy do) and `python3 test/compare.py`. They
 use their own settings folder: never the live proxy's. Smoke checks: `python3 -m py_compile *.py`,
 `bash -n psiproxy`, and a run on 127.0.0.1 with `curl -x 127.0.0.1:8081
 http://example.com/`. The link between the Psion and PsiProxy is plain

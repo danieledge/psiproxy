@@ -133,7 +133,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 PSISIMP = os.environ.get("PSISIMP", os.path.join(CONFIG_DIR, "psisimp"))
 
 PROXY_HOST = "psiproxy"                   # the magic control-page name (back-compat)
-PROXY_VERSION = "PsiProxy/1.01"
+PROXY_VERSION = "PsiProxy/1.02"
 # The Psion's Links reads 8-bit Windows-1252, not UTF-8, so every HTML response
 # is encoded to cp1252 and declared as such (see _html_bytes).
 HTML_CTYPE = "text/html; charset=windows-1252"
@@ -142,6 +142,7 @@ HTML_CTYPE = "text/html; charset=windows-1252"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 MAX_BODY = 4 * 1024 * 1024               # cap one fetched body (mirrors the Atom's bound)
+MAX_INFLATED = 8 * MAX_BODY              # ... and what a gzipped one may unpack to
 PROXY_IMG_MAXW = 320                     # transcoded images: largest width, in pixels
 PROXY_ARTICLE_MINCHARS = 800             # extracted text shorter than this -> treat the
                                          # page as an index/homepage and simplify it whole
@@ -600,12 +601,13 @@ class SocketTransport:
         # the socket is non-blocking: sendall() gives up (BlockingIOError)
         # as soon as the send buffer is full, which silently cut big
         # responses short for slow clients. Wait for room instead (up to
-        # 120 s without progress).
+        # 120 s without progress). False: the client has gone (or stalled),
+        # and not all of it went.
         view = memoryview(data)
         idle = 0.0
         while view:
             if self._stop.is_set():
-                return
+                return False
             try:
                 n = self.sock.send(view)
                 view = view[n:]
@@ -614,15 +616,16 @@ class SocketTransport:
             except BlockingIOError:
                 pass
             except OSError:
-                return
+                return False
             try:
                 _, w, _ = select.select([], [self.sock], [], 1.0)
             except (OSError, ValueError):
-                return
+                return False
             if not w:
                 idle += 1.0
                 if idle >= 120:
-                    return
+                    return False
+        return True
 
 
 def _content_length(header_text):
@@ -803,7 +806,7 @@ class ProxySession:
         # Device logs: the apps POST their log here (a button) so it lands on the
         # box for debugging. Saved to ~/psion-logs/<app>-<timestamp>.log.
         if apath.rstrip("/").endswith("/_putlog"):
-            return self._do_putlog(aquery, body, headers)
+            return self._do_putlog(aquery, body, headers, method)
 
         # Optional plug-ins (see load_plugins): served only if the module
         # loaded at start; a route whose plug-in is absent answers 404.
@@ -1026,7 +1029,7 @@ class ProxySession:
                      ok=(status < 500))
         return not close
 
-    def _do_putlog(self, aquery, body, headers=None):
+    def _do_putlog(self, aquery, body, headers=None, method="POST"):
         """Save a log the device POSTed (the apps' "Send log to server" button).
         ?app=<name> picks the filename; the body is the log. -> PSIPROXY_LOG_DIR
         (default ~/psion-logs), pruned to PSIPROXY_LOG_MAX_MB/_MAX_FILES.
@@ -1046,6 +1049,13 @@ class ProxySession:
                 self.t.send(_http_response(403, "Forbidden", b"Token needed\n",
                             "text/plain; charset=us-ascii", False, close=True))
                 return False
+        if method != "POST":
+            # (a GET would let any page's <img> write empty logs here and
+            # push the real ones out of the folder)
+            self.t.send(_http_response(405, "Method Not Allowed", b"POST the log\n",
+                        "text/plain; charset=us-ascii", False, close=True,
+                        extra_headers=[("Allow", "POST")]))
+            return False
         app = (q.get("app", ["log"]) or ["log"])[0] or "log"
         app = re.sub(r"[^A-Za-z0-9_.-]", "", app)[:40].lstrip(".") or "log"
         data = body or b""
@@ -1223,7 +1233,11 @@ class ProxySession:
                     break
                 if not chunk:
                     break
-                self.t.send(chunk)
+                if self.t.send(chunk) is False:
+                    # the client has gone: stop fetching (a download nobody
+                    # is reading was fetched to its end, whatever its size)
+                    close = True
+                    break
                 total += len(chunk)
         try:
             resp.close()
@@ -1456,13 +1470,43 @@ class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_GuardedHTTPSConnection, req, context=self._context)
 
 
+class _HTTPOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib follows a redirect to ftp:// as well, through its own FTP
+    handler, which _guarded_connect never sees: a site could send the proxy
+    to an FTP port on a private address. Only http and https are followed."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        scheme = urllib.parse.urlsplit(newurl).scheme.lower()
+        if scheme not in ("http", "https"):
+            raise BlockedDestination("a redirect to %s: is not followed" % (scheme or "nothing"))
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        # urllib sends the first request's headers on: the Psion's cookies
+        # and password for one site must not go to another it redirects to
+        if new is not None and not _same_site(req.full_url, newurl):
+            for h in list(new.headers):
+                if h.lower() in ("cookie", "authorization"):
+                    del new.headers[h]
+            ck = _with_consent(newurl, None)
+            if ck:
+                new.add_header("Cookie", ck)
+        return new
+
+
+def _same_site(url1, url2):
+    """True if the two addresses' hosts are the same, or one is a subdomain
+    of the other (example.com and www.example.com)."""
+    a = (urllib.parse.urlsplit(url1).hostname or "").lower().rstrip(".")
+    b = (urllib.parse.urlsplit(url2).hostname or "").lower().rstrip(".")
+    return bool(a) and (a == b or a.endswith("." + b) or b.endswith("." + a))
+
+
 def _build_opener():
     """urllib opener whose every connection, redirects included, goes
     through _guarded_connect. Environment proxies (http_proxy) are ignored."""
     ctx = ssl.create_default_context()
     return urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                        _GuardedHTTPHandler(),
-                                       _GuardedHTTPSHandler(context=ctx))
+                                       _GuardedHTTPSHandler(context=ctx),
+                                       _HTTPOnlyRedirectHandler())
 
 
 def _blocked_reason(e):
@@ -2436,6 +2480,8 @@ def _transcode_image(body_bytes, log):
             im.seek(0)                       # multi-frame (animated GIF/WebP): first frame
         except Exception:
             pass
+        if im.width <= 0 or im.height <= 0 or im.width * im.height > 40_000_000:
+            return None                      # (as _transcode_colour: not decoded at all)
         im = im.convert("L")                 # greyscale
         if im.width > PROXY_IMG_MAXW:
             h = max(1, int(im.height * PROXY_IMG_MAXW / im.width))
@@ -3232,6 +3278,27 @@ def _open_upstream(method, url, client_headers, body, is_image, range_header, lo
     return resp, status, reason, final_url, ctype, hdrs
 
 
+def _inflate_capped(raw, wbits, cap=MAX_INFLATED):
+    """Un-gzip (wbits 31) or inflate raw, stopping at cap bytes of output: a
+    few KB of zeros squashed can otherwise unpack to gigabytes in memory. A
+    body cut short by MAX_BODY gives what there was of it, as before."""
+    out, n = [], 0
+    while raw and n < cap:
+        d = zlib.decompressobj(wbits)
+        try:
+            piece = d.decompress(raw, cap - n)
+        except zlib.error:
+            if not out:
+                raise
+            break                            # (rubbish after the first gzip member)
+        out.append(piece)
+        n += len(piece)
+        if wbits != 31 or not d.eof:
+            break
+        raw = d.unused_data                  # (gzip members one after another)
+    return b"".join(out)
+
+
 def _read_body_decoded(resp, hdrs, method, cap=MAX_BODY):
     """Read an upstream body into memory (capped) and un-gzip/deflate it. Used by
     the HTML/image path only (streaming downloads never call this). Returns
@@ -3244,15 +3311,15 @@ def _read_body_decoded(resp, hdrs, method, cap=MAX_BODY):
     bodyb = raw
     if "gzip" in ce:
         try:
-            bodyb = _gzip.decompress(raw)
+            bodyb = _inflate_capped(raw, 31)
         except Exception:
             pass
     elif "deflate" in ce:
         try:
-            bodyb = zlib.decompress(raw)
+            bodyb = _inflate_capped(raw, 15)
         except zlib.error:
             try:
-                bodyb = zlib.decompress(raw, -15)
+                bodyb = _inflate_capped(raw, -15)
             except Exception:
                 pass
     return bodyb, truncated
