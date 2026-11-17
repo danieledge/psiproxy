@@ -151,7 +151,7 @@ def shots(psiweb, idx, res, only):
             for scr, opts in (("5mx", []), ("netbook", ["--netbook"])):
                 script = os.path.join(OUT, "%s-%s.txt" % (name, scr))
                 with open(script, "w") as f:
-                    f.write("open %s\nidle\nshot %s\nkey 4\nidle\nshot %s\nquit\n"
+                    f.write("open %s\nidle\nshot %s\nkey 281\nidle\nshot %s\nquit\n"
                             % (url, os.path.join(OUT, "%s-%s.png" % (name, scr)),
                                os.path.join(OUT, "%s-%s-2.png" % (name, scr))))
                 j = os.path.join(OUT, "%s-%s.json" % (name, scr))
