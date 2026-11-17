@@ -285,6 +285,7 @@ sending small photos as PNG.
 python3 test/fetch_fixtures.py     # once: saves real pages and pictures in test/fixtures/ (git-ignored)
 python3 test/test_netbook.py       # the tests (made-up pages and pictures when there are no fixtures)
 python3 test/test_guards.py        # the limits: unpacking, redirects, huge pictures, /_putlog, dropped downloads
+python3 test/test_text.py          # pages keep their text: a short page, a disambiguation page, a short article
 python3 test/compare.py            # 5mx against netBook, page by page and picture by picture: test/out/
 python3 test/compare.py --psiweb ../psiweb bbc-article   # and screenshots through PsiWeb's ARM harness
 ```

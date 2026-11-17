@@ -34,6 +34,10 @@ ITEMS = [
     ("npr-text", "https://text.npr.org/", "page"),
     ("python-docs", "https://docs.python.org/3/tutorial/datastructures.html", "page"),
     ("hn", "https://news.ycombinator.com/", "page"),
+    # (test_text.py) a short page of prose with no headlines, and a
+    # disambiguation page: a list of described links
+    ("example", "https://example.com/", "page"),
+    ("wiki-disambig", "https://en.wikipedia.org/wiki/Psion", "page"),
     # pictures: a photo, a big photo, a drawing with flat colours, a PNG
     # with transparency, a WebP
     ("photo-jpeg", "https://www.gstatic.com/webp/gallery/1.jpg", "picture"),

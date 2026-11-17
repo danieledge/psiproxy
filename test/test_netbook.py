@@ -50,6 +50,16 @@ def log(_msg):
 # output must stay byte for byte what it gave. Move it on only with a
 # change to the 5mx's output that is meant.
 BASELINE_REF = os.environ.get("PSIPROXY_BASELINE_REF", "84c7707")
+# saved pages whose 5mx output has changed on purpose since BASELINE_REF:
+# for these the check is that no text is lost, not the same bytes
+MEANT_5MX_CHANGES = {
+    # 1.03: pages that came back with no text, or only links
+    "example": "a short page of prose kept as an article, not an empty index",
+    "wiki-disambig": "a list item keeps the words that say what its link is",
+    "wiki-netbook": "a prose-rich page is an article, whatever its story links",
+    "guardian-article": "the same",
+    "wiki-table": "four reference items keep their words",
+}
 
 
 def load_baseline():
@@ -341,7 +351,23 @@ class TestFiveMxUnchanged(unittest.TestCase):
             self.skipTest("no fixtures (test/fetch_fixtures.py)")
         for n in pages:
             data, url = fixture(n)
-            self.compare(core._decode_html(data, "text/html; charset=utf-8"), url)
+            html = core._decode_html(data, "text/html; charset=utf-8")
+            if n in MEANT_5MX_CHANGES:
+                self.more_text(html, url, n)
+            else:
+                self.compare(html, url)
+
+    def more_text(self, html, url, n):
+        """A page whose 5mx output changed on purpose: it shows at least the
+        text it did (test_text.py checks what it now shows)."""
+        for reading in (False, True):
+            for mod in (core, self.base):
+                mod.STATE.reading = reading
+            before = len(core._visible_text(slim(self.base, html, url, None)))
+            after = len(core._visible_text(slim(core, html, url, MX)))
+            self.assertGreaterEqual(after, before, "%s reading=%s" % (n, reading))
+        for mod in (core, self.base):
+            mod.STATE.reading = False
 
     def test_pictures(self):
         for data in (synthetic_photo(), synthetic_logo()):

@@ -133,7 +133,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 PSISIMP = os.environ.get("PSISIMP", os.path.join(CONFIG_DIR, "psisimp"))
 
 PROXY_HOST = "psiproxy"                   # the magic control-page name (back-compat)
-PROXY_VERSION = "PsiProxy/1.02"
+PROXY_VERSION = "PsiProxy/1.03"
 # The Psion's Links reads 8-bit Windows-1252, not UTF-8, so every HTML response
 # is encoded to cp1252 and declared as such (see _html_bytes).
 HTML_CTYPE = "text/html; charset=windows-1252"
@@ -311,6 +311,9 @@ PROXY_INDEX_LINKRATIO_HARD = 0.5         # link-text this dominant => index on i
 PROXY_INDEX_PROSE_FRAC = 0.15            # prose chars below this fraction of text => index-like
 PROXY_INDEX_MIN_STORYLINKS = 15          # this many permalink-looking links => index-like ...
 PROXY_INDEX_MAX_PROSE_P = 20             # ... when fewer than this many prose paragraphs
+PROXY_INDEX_PROSE_RICH = 0.25            # ... unless prose is at least this fraction of the text
+PROXY_ITEM_MINWORDS = 3                  # index: a list item with this many words besides its
+                                         # links keeps its text ("Psion (company), a British ...")
 PROXY_HEADLINE_MINWORDS = 4              # a link with >= this many words is a headline, not nav
 PROXY_ARIA_HIDDEN_MAXLEN = 400           # only delete aria-hidden subtrees shorter than this
 # a11y "visually hidden" class idioms (the CSS-stripped source of Attribution/time noise)
@@ -1602,7 +1605,7 @@ def _fmt_date(iso):
 
 
 def _build_article(body_bytes, final_url, keep_images, keep_links, width,
-                   footer_label, log):
+                   footer_label, log, thin_ok=False):
     """Build a clean single-column article page: a centred column (<table width=N>,
     which Links honours since it has no CSS), a plain big <h1> title (never a
     link), a <font size="2"> byline (author / date / source / reading time), the
@@ -1680,7 +1683,7 @@ def _build_article(body_bytes, final_url, keep_images, keep_links, width,
     imgs_in_body = len(re.findall(r"<img", body_html, re.I))
     # a gallery/listicle can be word-light but is still a real article if it has
     # several pictures - don't demote it to the index pipeline (which drops images)
-    if words < 120 and imgs_in_body < 3:
+    if words < 120 and imgs_in_body < 3 and not (thin_ok and words):
         log("article: thin (%d words, %d imgs); whole page" % (words, imgs_in_body))
         return None
     mins = max(1, round(words / 200))
@@ -1735,18 +1738,20 @@ def _build_article(body_bytes, final_url, keep_images, keep_links, width,
     return "\n".join(out)
 
 
-def _reader_page(body_bytes, final_url, log):
+def _reader_page(body_bytes, final_url, log, thin_ok=False):
     """Reading view: the clean article skeleton with pictures off and in-text
     links flattened to plain text."""
     return _build_article(body_bytes, final_url, keep_images=False, keep_links=False,
-                          width=_screen().reader_column, footer_label="Reader view", log=log)
+                          width=_screen().reader_column, footer_label="Reader view", log=log,
+                          thin_ok=thin_ok)
 
 
-def _normal_article_page(body_bytes, final_url, log):
+def _normal_article_page(body_bytes, final_url, log, thin_ok=False):
     """Normal mode, article pages: the same clean skeleton, but with pictures and
     in-text links kept (so the title is a heading, body links are underlined)."""
     return _build_article(body_bytes, final_url, keep_images=True, keep_links=True,
-                          width=_screen().column, footer_label=None, log=log)
+                          width=_screen().column, footer_label=None, log=log,
+                          thin_ok=thin_ok)
 
 
 def _looks_like_index(url):
@@ -2302,16 +2307,27 @@ def _classify_index(html, log):
         # link text dominating is the clean discriminator (an index is mostly
         # link text; an article is mostly prose). Summary-heavy indexes (BBC) keep
         # many prose paragraphs, so prose count alone cannot be trusted.
+        # A page whose prose is a good share of its text is an article
+        # however many story-like links it has: Wikipedia's every /wiki/ link
+        # looks like one, and a short article with a big infobox and navboxes
+        # (Psion netBook) came out as a list of links with no article text.
+        prose_rich = prose_chars >= PROXY_INDEX_PROSE_RICH * total
         is_index = (ratio > PROXY_INDEX_LINKRATIO_HARD
-                    or (ratio > PROXY_INDEX_LINKRATIO and story > PROXY_INDEX_MIN_STORYLINKS)
+                    or (ratio > PROXY_INDEX_LINKRATIO and story > PROXY_INDEX_MIN_STORYLINKS
+                        and not prose_rich)
                     or (ratio > PROXY_INDEX_LINKRATIO and prose_chars < PROXY_INDEX_PROSE_FRAC * total)
-                    or (story > PROXY_INDEX_MIN_STORYLINKS and prose_p < PROXY_INDEX_MAX_PROSE_P))
+                    or (story > PROXY_INDEX_MIN_STORYLINKS and prose_p < PROXY_INDEX_MAX_PROSE_P
+                        and not prose_rich))
         log("classify: linkratio=%.2f prose=%d/%d story=%d prose_p=%d -> %s"
             % (ratio, prose_chars, total, story, prose_p, "index" if is_index else "article"))
         return is_index
     except Exception as e:
         log("classify: failed (%s); article" % e)
         return False
+
+
+_ITEM_BLOCKS = frozenset(("li", "ul", "ol", "dl", "table", "div", "p", "section",
+                          "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6"))
 
 
 def _index_page2(html, final_url, log):
@@ -2364,8 +2380,53 @@ def _index_page2(html, final_url, log):
         else:
             decision[id(a)] = "nav"
 
+    # A list item that says what its link is ("Psion (company), a British
+    # mobile computer company", a disambiguation page's or a list of
+    # programs' items) keeps its words: as a bare link, or worse as a Menu
+    # entry, it says nothing. Not a footnote (it starts with a link back,
+    # "#cite..."), nor an item with lists or blocks inside it.
+    here = final_url.split("#")[0].rstrip("/").lower()
+
+    def on_page(a):
+        h = (a.get("href") or "").strip()
+        return h.startswith("#") or ("#" in h and h.split("#")[0].rstrip("/").lower() == here)
+
+    def described_item(li):
+        for x in li.iterdescendants():
+            if isinstance(x.tag, str) and x.tag.lower() in _ITEM_BLOCKS:
+                return False
+        links = [a for a in li.iter("a") if isinstance(a.tag, str)]
+        if not links or on_page(links[0]):
+            return False
+        if not any(norm(a) and decision.get(id(a)) != "drop" for a in links):
+            return False
+        words = len(re.sub(r"\s+", " ", li.text_content() or "").split())
+        return words - sum(len(atext(a).split()) for a in links) >= PROXY_ITEM_MINWORDS
+
+    def item_html(li):
+        parts = []
+
+        def walk(el):
+            if el.text:
+                parts.append(_esc_text(el.text))
+            for c in el:
+                if isinstance(c.tag, str):
+                    if c.tag.lower() == "a" and norm(c) and decision.get(id(c)) != "drop":
+                        parts.append('<a href="%s">%s</a>' % (_esc_attr(c.get("href") or norm(c)),
+                                                             _esc_text(atext(c))))
+                    elif c.tag.lower() == "br":
+                        parts.append(" ")
+                    else:
+                        walk(c)
+                if c.tail:
+                    parts.append(_esc_text(c.tail))
+        walk(li)
+        return re.sub(r"\s+", " ", "".join(parts)).strip()
+
     collapse_nav = STATE.collapse_nav
     body = []
+    handled = set()
+    items = 0
     ul_open = [False]
     pending_nav = []
     nav_bottom = []
@@ -2397,7 +2458,19 @@ def _index_page2(html, final_url, log):
                 flush_nav_inline()
                 close_ul()
                 body.append("<h2>%s</h2>" % _esc_text(txt))
+        elif tag == "li" and described_item(el):
+            links = [a for a in el.iter("a") if isinstance(a.tag, str)]
+            handled.update(id(a) for a in links)
+            seen_content.update(norm(a) for a in links if norm(a))
+            flush_nav_inline()
+            if not ul_open[0]:
+                body.append("<ul>")
+                ul_open[0] = True
+            body.append("<li>%s</li>" % item_html(el))
+            items += 1
         elif tag == "a":
+            if id(el) in handled:
+                continue
             d = decision.get(id(el))
             t = atext(el)
             h = norm(el)
@@ -2437,7 +2510,8 @@ def _index_page2(html, final_url, log):
     assembled = _strip_index_noise(assembled)                       # R7 safety net
     assembled = _minimize_html(assembled, False, True, log)         # allowlist; no images, keep links
     assembled = _tidy_html(assembled.encode("utf-8", "replace")).decode("utf-8", "replace")
-    log("index2: %d headlines, %d nav links" % (len(seen_content), len(seen_nav)))
+    log("index2: %d headlines, %d nav links%s" % (len(seen_content), len(seen_nav),
+                                                 ", %d described items" % items if items else ""))
     out = ['<base href="%s">' % _esc_attr(final_url),
            '<table width="%d" align="center"><tr><td>' % _screen().column,
            assembled,
@@ -2457,15 +2531,34 @@ def _safe_index2(cleaned, final_url, log):
 
 def _render_html_page(cleaned, final_url, log):
     """Route cleaned HTML: reading view -> reader; else classify index vs article.
-    Article extraction that comes back thin falls back to the index pipeline."""
+    Article extraction that comes back thin falls back to the index pipeline,
+    unless that shows less of the page's text than the thin article does (a
+    short page of prose, such as example.com, has no headlines to list)."""
     enc = cleaned.encode("utf-8", "replace")
     if STATE.reading:
         page = _reader_page(enc, final_url, log)
-        return page if page is not None else _safe_index2(cleaned, final_url, log)
+        return page if page is not None else _thin_or_index(enc, cleaned, final_url, log,
+                                                            _reader_page)
     if _classify_index(cleaned, log):
         return _safe_index2(cleaned, final_url, log)
     page = _normal_article_page(enc, final_url, log)
-    return page if page is not None else _safe_index2(cleaned, final_url, log)
+    return page if page is not None else _thin_or_index(enc, cleaned, final_url, log,
+                                                        _normal_article_page)
+
+
+def _thin_or_index(enc, cleaned, final_url, log, article):
+    """A thin article's fallback: the index pipeline, or the thin article
+    itself (article(..., thin_ok=True)) when that has more visible text."""
+    idx = _safe_index2(cleaned, final_url, log)
+    try:
+        thin = article(enc, final_url, log, thin_ok=True)
+    except Exception as e:
+        log("article: thin page failed (%s)" % e)
+        thin = None
+    if thin and len(_visible_text(thin)) > len(_visible_text(idx)):
+        log("article: thin, but more text than the index view; kept as an article")
+        return thin
+    return idx
 
 
 def _transcode_image(body_bytes, log):
